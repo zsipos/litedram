@@ -97,7 +97,7 @@ class S7DDRPHY(Module, AutoCSR):
             wrcmdphase=wrcmdphase,
             cl=cl,
             cwl=cwl,
-            read_latency=2 + cl_sys_latency + 2 + 3,
+            read_latency=2 + cl_sys_latency + 1 + 3,
             write_latency=cwl_sys_latency
         )
 
@@ -212,6 +212,7 @@ class S7DDRPHY(Module, AutoCSR):
                 )
             ]
 
+        dqs_i = Signal(databits//8)
         for i in range(databits//8):
             dm_o_nodelay = Signal()
             self.specials += \
@@ -244,8 +245,8 @@ class S7DDRPHY(Module, AutoCSR):
                         o_ODATAIN=dm_o_nodelay, o_DATAOUT=pads.dm[i]
                     )
 
-            dqs_nodelay = Signal()
-            dqs_delayed = Signal()
+            dqs_o_nodelay = Signal()
+            dqs_o_delayed = Signal()
             dqs_t = Signal()
             self.specials += \
                 Instance("OSERDESE2",
@@ -253,8 +254,8 @@ class S7DDRPHY(Module, AutoCSR):
                     p_DATA_RATE_OQ="DDR", p_DATA_RATE_TQ="BUF",
                     p_SERDES_MODE="MASTER",
 
-                    o_OFB=dqs_nodelay if with_odelay else Signal(),
-                    o_OQ=Signal() if with_odelay else dqs_nodelay,
+                    o_OFB=dqs_o_nodelay if with_odelay else Signal(),
+                    o_OQ=Signal() if with_odelay else dqs_o_nodelay,
                     o_TQ=dqs_t,
                     i_OCE=1, i_TCE=1,
                     i_RST=ResetSignal(),
@@ -277,12 +278,13 @@ class S7DDRPHY(Module, AutoCSR):
                         i_CE=self._dly_sel.storage[i] & self._wdly_dqs_inc.re,
                         i_LDPIPEEN=0, i_INC=1,
 
-                        o_ODATAIN=dqs_nodelay, o_DATAOUT=dqs_delayed
+                        o_ODATAIN=dqs_o_nodelay, o_DATAOUT=dqs_o_delayed
                     )
             self.specials += \
-                Instance("OBUFTDS",
-                    i_I=dqs_delayed if with_odelay else dqs_nodelay, i_T=dqs_t,
-                    o_O=pads.dqs_p[i], o_OB=pads.dqs_n[i]
+                Instance("IOBUFDS",
+                    i_I=dqs_o_delayed if with_odelay else dqs_o_nodelay, i_T=dqs_t,
+                    io_IO=pads.dqs_p[i], io_IOB=pads.dqs_n[i],
+                    o_O=dqs_i[i],
                 )
 
         # DQ
@@ -309,23 +311,25 @@ class S7DDRPHY(Module, AutoCSR):
                     i_D7=self.dfi.phases[3].wrdata[i], i_D8=self.dfi.phases[3].wrdata[databits+i],
                     i_T1=~oe_dq
                 )
+            dq_i_data_half = Signal(4)
             dq_i_data = Signal(8)
             self.specials += \
                 Instance("ISERDESE2",
-                    p_DATA_WIDTH=2*nphases, p_DATA_RATE="DDR",
-                    p_SERDES_MODE="MASTER", p_INTERFACE_TYPE="NETWORKING",
+                    p_DATA_WIDTH=nphases, p_DATA_RATE="DDR",
+                    p_SERDES_MODE="MASTER", p_INTERFACE_TYPE="MEMORY",
                     p_NUM_CE=1, p_IOBDELAY="IFD",
 
                     i_DDLY=dq_i_delayed,
                     i_CE1=1,
                     i_RST=ResetSignal(),
-                    i_CLK=ClockSignal(ddr_clk), i_CLKB=~ClockSignal(ddr_clk), i_CLKDIV=ClockSignal(),
+                    i_CLK=dqs_i[i//8], i_CLKB=~dqs_i[i//8],
+                    i_OCLK=ClockSignal(ddr_clk), i_OCLKB=~ClockSignal(ddr_clk), i_CLKDIV=ClockSignal("sys2x"),
                     i_BITSLIP=0,
-                    o_Q8=dq_i_data[0], o_Q7=dq_i_data[1],
-                    o_Q6=dq_i_data[2], o_Q5=dq_i_data[3],
-                    o_Q4=dq_i_data[4], o_Q3=dq_i_data[5],
-                    o_Q2=dq_i_data[6], o_Q1=dq_i_data[7]
+                    o_Q4=dq_i_data_half[0], o_Q3=dq_i_data_half[1],
+                    o_Q2=dq_i_data_half[2], o_Q1=dq_i_data_half[3]
                 )
+            self.sync.sys2x += dq_i_data.eq(Cat(dq_i_data[4:], dq_i_data_half))
+
             dq_bitslip = BitSlip(8)
             self.comb += dq_bitslip.i.eq(dq_i_data)
             self.sync += \
@@ -388,7 +392,7 @@ class S7DDRPHY(Module, AutoCSR):
         # total read latency:
         #  2 cycles through OSERDESE2
         #  cl_sys_latency cycles CAS
-        #  2 cycles through ISERDESE2
+        #  1 cycles through ISERDESE2
         #  3 cycles through Bitslip
         rddata_en = self.dfi.phases[self.settings.rdphase].rddata_en
         for i in range(self.settings.read_latency-1):
