@@ -213,6 +213,7 @@ class S7DDRPHY(Module, AutoCSR):
             ]
 
         dqs_i = Signal(databits//8)
+        dqs_i_delayed = Signal(databits//8)
         for i in range(databits//8):
             dm_o_nodelay = Signal()
             self.specials += \
@@ -281,6 +282,14 @@ class S7DDRPHY(Module, AutoCSR):
                         o_ODATAIN=dqs_o_nodelay, o_DATAOUT=dqs_o_delayed
                     )
             self.specials += \
+                Instance("IDELAYE2",
+                    p_DELAY_SRC="IDATAIN", p_SIGNAL_PATTERN="DATA",
+                    p_CINVCTRL_SEL="FALSE", p_HIGH_PERFORMANCE_MODE="TRUE", p_REFCLK_FREQUENCY=iodelay_clk_freq/1e6,
+                    p_PIPE_SEL="FALSE", p_IDELAY_TYPE="FIXED", p_IDELAY_VALUE=half_sys8x_taps,
+
+                    i_IDATAIN=dqs_i[i], o_DATAOUT=dqs_i_delayed[i]
+                )
+            self.specials += \
                 Instance("IOBUFDS",
                     i_I=dqs_o_delayed if with_odelay else dqs_o_nodelay, i_T=dqs_t,
                     io_IO=pads.dqs_p[i], io_IOB=pads.dqs_n[i],
@@ -322,7 +331,7 @@ class S7DDRPHY(Module, AutoCSR):
                     i_DDLY=dq_i_delayed,
                     i_CE1=1,
                     i_RST=ResetSignal(),
-                    i_CLK=dqs_i[i//8], i_CLKB=~dqs_i[i//8],
+                    i_CLK=dqs_i_delayed[i//8], i_CLKB=~dqs_i_delayed[i//8],
                     i_OCLK=ClockSignal(ddr_clk), i_OCLKB=~ClockSignal(ddr_clk), i_CLKDIV=ClockSignal("sys2x"),
                     i_BITSLIP=0,
                     o_Q4=dq_i_data_half[0], o_Q3=dq_i_data_half[1],
