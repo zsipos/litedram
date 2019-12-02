@@ -5,6 +5,7 @@
 
 from migen import *
 
+# LiteDRAMWishbone2Native --------------------------------------------------------------------------
 
 class LiteDRAMWishbone2Native(Module):
     def __init__(self, wishbone, port, base_address=0x00000000):
@@ -14,7 +15,7 @@ class LiteDRAMWishbone2Native(Module):
 
         adr_offset = base_address >> log2_int(port.data_width//8)
 
-        # Control
+        # Control ----------------------------------------------------------------------------------
         self.submodules.fsm = fsm = FSM(reset_state="CMD")
         fsm.act("CMD",
             port.cmd.valid.eq(wishbone.cyc & wishbone.stb),
@@ -42,69 +43,13 @@ class LiteDRAMWishbone2Native(Module):
             )
         )
 
-        # Datapath
+        # Datapath ---------------------------------------------------------------------------------
         self.comb += [
-            # cmd
+            # Cmd
             port.cmd.addr.eq(wishbone.adr - adr_offset),
-            # write
+            # Write
             port.wdata.we.eq(wishbone.sel),
             port.wdata.data.eq(wishbone.dat_w),
-            # read
+            # Read
             wishbone.dat_r.eq(port.rdata.data),
         ]
-
-
-class LiteDRAMWishbone2AXI(Module):
-    def __init__(self, wishbone, port):
-        assert len(wishbone.dat_w) == len(port.w.data)
-
-        # # #
-
-        ashift = log2_int(port.data_width//8)
-
-        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
-        fsm.act("IDLE",
-            If(wishbone.cyc & wishbone.stb,
-                If(wishbone.we,
-                    NextValue(port.aw.valid, 1),
-                    NextValue(port.w.valid, 1),
-                    NextState("WRITE")
-                ).Else(
-                    NextValue(port.ar.valid, 1),
-                    NextState("READ")
-                )
-            )
-        )
-        fsm.act("WRITE",
-            port.aw.size.eq(ashift),
-            port.aw.addr[ashift:].eq(wishbone.adr),
-            port.w.last.eq(1),
-            port.w.data.eq(wishbone.dat_w),
-            port.w.strb.eq(wishbone.sel),
-            If(port.aw.ready,
-                NextValue(port.aw.valid, 0)
-            ),
-            If(port.w.ready,
-                NextValue(port.w.valid, 0)
-            ),
-            If(port.b.valid,
-                port.b.ready.eq(1),
-                wishbone.ack.eq(1),
-                wishbone.err.eq(port.b.resp != 0b00),
-                NextState("IDLE")
-            )
-        )
-        fsm.act("READ",
-            port.ar.size.eq(ashift),
-            port.ar.addr[ashift:].eq(wishbone.adr),
-            If(port.ar.ready,
-                NextValue(port.ar.valid, 0)
-            ),
-            If(port.r.valid,
-                port.r.ready.eq(1),
-                wishbone.dat_r.eq(port.r.data),
-                wishbone.ack.eq(1),
-                wishbone.err.eq(port.r.resp != 0b00),
-                NextState("IDLE")
-            )
-        )
