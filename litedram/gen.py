@@ -46,6 +46,7 @@ from litedram.frontend.axi import *
 from litedram.frontend.wishbone import *
 from litedram.frontend.bist import LiteDRAMBISTGenerator
 from litedram.frontend.bist import LiteDRAMBISTChecker
+from litedram.frontend.fifo import LiteDRAMFIFO
 
 # IOs/Interfaces -----------------------------------------------------------------------------------
 
@@ -65,7 +66,7 @@ def get_common_ios():
         ("pll_locked", 0, Pins(1)),
 
         # init status
-        ("init_done", 0, Pins(1)),
+        ("init_done",  0, Pins(1)),
         ("init_error", 0, Pins(1)),
 
         # iodelay clk / rst
@@ -81,20 +82,20 @@ def get_dram_ios(core_config):
     sdram_module = core_config["sdram_module"]
     return [
         ("ddram", 0,
-            Subsignal("a", Pins(log2_int(core_config["sdram_module"].nrows))),
-            Subsignal("ba", Pins(log2_int(core_config["sdram_module"].nbanks))),
-            Subsignal("ras_n", Pins(1)),
-            Subsignal("cas_n", Pins(1)),
-            Subsignal("we_n", Pins(1)),
-            Subsignal("cs_n", Pins(core_config["sdram_rank_nb"])),
-            Subsignal("dm", Pins(core_config["sdram_module_nb"])),
-            Subsignal("dq", Pins(8*core_config["sdram_module_nb"])),
-            Subsignal("dqs_p", Pins(core_config["sdram_module_nb"])),
-            Subsignal("dqs_n", Pins(core_config["sdram_module_nb"])),
-            Subsignal("clk_p", Pins(core_config["sdram_rank_nb"])),
-            Subsignal("clk_n", Pins(core_config["sdram_rank_nb"])),
-            Subsignal("cke", Pins(core_config["sdram_rank_nb"])),
-            Subsignal("odt", Pins(core_config["sdram_rank_nb"])),
+            Subsignal("a",       Pins(log2_int(core_config["sdram_module"].nrows))),
+            Subsignal("ba",      Pins(log2_int(core_config["sdram_module"].nbanks))),
+            Subsignal("ras_n",   Pins(1)),
+            Subsignal("cas_n",   Pins(1)),
+            Subsignal("we_n",    Pins(1)),
+            Subsignal("cs_n",    Pins(core_config["sdram_rank_nb"])),
+            Subsignal("dm",      Pins(core_config["sdram_module_nb"])),
+            Subsignal("dq",      Pins(8*core_config["sdram_module_nb"])),
+            Subsignal("dqs_p",   Pins(core_config["sdram_module_nb"])),
+            Subsignal("dqs_n",   Pins(core_config["sdram_module_nb"])),
+            Subsignal("clk_p",   Pins(core_config["sdram_rank_nb"])),
+            Subsignal("clk_n",   Pins(core_config["sdram_rank_nb"])),
+            Subsignal("cke",     Pins(core_config["sdram_rank_nb"])),
+            Subsignal("odt",     Pins(core_config["sdram_rank_nb"])),
             Subsignal("reset_n", Pins(1))
         ),
     ]
@@ -111,7 +112,7 @@ def get_csr_ios(aw, dw):
 
 def get_native_user_port_ios(_id, aw, dw):
     return [
-        ("user_port", _id,
+        ("user_port_{}".format(_id), 0,
             # cmd
             Subsignal("cmd_valid", Pins(1)),
             Subsignal("cmd_ready", Pins(1)),
@@ -133,7 +134,7 @@ def get_native_user_port_ios(_id, aw, dw):
 
 def get_wishbone_user_port_ios(_id, aw, dw):
     return [
-        ("user_port", _id,
+        ("user_port_{}".format(_id), 0,
             Subsignal("adr",   Pins(aw)),
             Subsignal("dat_w", Pins(dw)),
             Subsignal("dat_r", Pins(dw)),
@@ -148,45 +149,60 @@ def get_wishbone_user_port_ios(_id, aw, dw):
 
 def get_axi_user_port_ios(_id, aw, dw, iw):
     return [
-        ("user_port", _id,
+        ("user_port_{}".format(_id), 0,
             # aw
-            Subsignal("aw_valid", Pins(1)),
-            Subsignal("aw_ready", Pins(1)),
-            Subsignal("aw_addr",  Pins(aw)),
-            Subsignal("aw_burst", Pins(2)),
-            Subsignal("aw_len",   Pins(8)),
-            Subsignal("aw_size",  Pins(4)),
-            Subsignal("aw_id",    Pins(iw)),
+            Subsignal("awvalid", Pins(1)),
+            Subsignal("awready", Pins(1)),
+            Subsignal("awaddr",  Pins(aw)),
+            Subsignal("awburst", Pins(2)),
+            Subsignal("awlen",   Pins(8)),
+            Subsignal("awsize",  Pins(4)),
+            Subsignal("awid",    Pins(iw)),
 
             # w
-            Subsignal("w_valid", Pins(1)),
-            Subsignal("w_ready", Pins(1)),
-            Subsignal("w_last",  Pins(1)),
-            Subsignal("w_strb",  Pins(dw//8)),
-            Subsignal("w_data",  Pins(dw)),
+            Subsignal("wvalid", Pins(1)),
+            Subsignal("wready", Pins(1)),
+            Subsignal("wlast",  Pins(1)),
+            Subsignal("wstrb",  Pins(dw//8)),
+            Subsignal("wdata",  Pins(dw)),
 
             # b
-            Subsignal("b_valid", Pins(1)),
-            Subsignal("b_ready", Pins(1)),
-            Subsignal("b_resp",  Pins(2)),
-            Subsignal("b_id",    Pins(iw)),
+            Subsignal("bvalid", Pins(1)),
+            Subsignal("bready", Pins(1)),
+            Subsignal("bresp",  Pins(2)),
+            Subsignal("bid",    Pins(iw)),
 
             # ar
-            Subsignal("ar_valid", Pins(1)),
-            Subsignal("ar_ready", Pins(1)),
-            Subsignal("ar_addr",  Pins(aw)),
-            Subsignal("ar_burst", Pins(2)),
-            Subsignal("ar_len",   Pins(8)),
-            Subsignal("ar_size",  Pins(4)),
-            Subsignal("ar_id",    Pins(iw)),
+            Subsignal("arvalid", Pins(1)),
+            Subsignal("arready", Pins(1)),
+            Subsignal("araddr",  Pins(aw)),
+            Subsignal("arburst", Pins(2)),
+            Subsignal("arlen",   Pins(8)),
+            Subsignal("arsize",  Pins(4)),
+            Subsignal("arid",    Pins(iw)),
 
             # r
-            Subsignal("r_valid", Pins(1)),
-            Subsignal("r_ready", Pins(1)),
-            Subsignal("r_last",  Pins(1)),
-            Subsignal("r_resp",  Pins(2)),
-            Subsignal("r_data",  Pins(dw)),
-            Subsignal("r_id",    Pins(iw))
+            Subsignal("rvalid", Pins(1)),
+            Subsignal("rready", Pins(1)),
+            Subsignal("rlast",  Pins(1)),
+            Subsignal("rresp",  Pins(2)),
+            Subsignal("rdata",  Pins(dw)),
+            Subsignal("rid",    Pins(iw))
+        ),
+    ]
+
+def get_fifo_user_port_ios(_id, dw):
+    return [
+        ("user_fifo_{}".format(_id), 0,
+            # in
+            Subsignal("in_valid", Pins(1)),
+            Subsignal("in_ready", Pins(1)),
+            Subsignal("in_data",  Pins(dw)),
+
+            # out
+            Subsignal("out_valid", Pins(1)),
+            Subsignal("out_ready", Pins(1)),
+            Subsignal("out_data",  Pins(dw)),
         ),
     ]
 
@@ -258,12 +274,14 @@ class LiteDRAMCore(SoCSDRAM):
             kwargs["integrated_rom_size"]  = 0
             kwargs["integrated_sram_size"] = 0
             kwargs["l2_size"]              = 0
+            kwargs["l2_data_width"]        = 32
             kwargs["with_uart"]            = False
             kwargs["with_timer"]           = False
             kwargs["with_ctrl"]            = False
             kwargs["with_wishbone"]        = (cpu_type != None)
         else:
-           kwargs["l2_size"] = 0
+           kwargs["l2_size"]       = 0
+           kwargs["l2_data_width"] = 32
 
         # SoCSDRAM ---------------------------------------------------------------------------------
         SoCSDRAM.__init__(self, platform, sys_clk_freq,
@@ -330,13 +348,14 @@ class LiteDRAMCore(SoCSDRAM):
             platform.request("user_clk").eq(ClockSignal()),
             platform.request("user_rst").eq(ResetSignal())
         ]
-        if core_config["user_ports_type"] == "native":
-            for i in range(core_config["user_ports_nb"]):
+        for name, port in core_config["user_ports"].items():
+            # Native -------------------------------------------------------------------------------
+            if port["type"] == "native":
                 user_port = self.sdram.crossbar.get_port()
-                platform.add_extension(get_native_user_port_ios(i,
+                platform.add_extension(get_native_user_port_ios(name,
                     user_port.address_width,
                     user_port.data_width))
-                _user_port_io = platform.request("user_port", i)
+                _user_port_io = platform.request("user_port_{}".format(name))
                 self.comb += [
                     # cmd
                     user_port.cmd.valid.eq(_user_port_io.cmd_valid),
@@ -355,18 +374,18 @@ class LiteDRAMCore(SoCSDRAM):
                     user_port.rdata.ready.eq(_user_port_io.rdata_ready),
                     _user_port_io.rdata_data.eq(user_port.rdata.data),
                 ]
-        elif core_config["user_ports_type"] == "wishbone":
-            for i in range(core_config["user_ports_nb"]):
+            # Wishbone -----------------------------------------------------------------------------
+            elif port["type"] == "wishbone":
                 user_port = self.sdram.crossbar.get_port()
                 wb_port = wishbone.Interface(
                     user_port.data_width,
                     user_port.address_width)
                 wishbone2native = LiteDRAMWishbone2Native(wb_port, user_port)
                 self.submodules += wishbone2native
-                platform.add_extension(get_wishbone_user_port_ios(i,
+                platform.add_extension(get_wishbone_user_port_ios(name,
                         len(wb_port.adr),
                         len(wb_port.dat_w)))
-                _wb_port_io = platform.request("user_port", i)
+                _wb_port_io = platform.request("user_port_{}".format(name))
                 self.comb += [
                     wb_port.adr.eq(_wb_port_io.adr),
                     wb_port.dat_w.eq(_wb_port_io.dat_w),
@@ -378,62 +397,87 @@ class LiteDRAMCore(SoCSDRAM):
                     wb_port.we.eq(_wb_port_io.we),
                     _wb_port_io.err.eq(wb_port.err),
                 ]
-        elif core_config["user_ports_type"] == "axi":
-            for i in range(core_config["user_ports_nb"]):
+            # AXI ----------------------------------------------------------------------------------
+            elif port["type"] == "axi":
                 user_port = self.sdram.crossbar.get_port()
                 axi_port  = LiteDRAMAXIPort(
                     user_port.data_width,
                     user_port.address_width + log2_int(user_port.data_width//8),
-                    core_config["user_ports_id_width"])
+                    port["id_width"])
                 axi2native = LiteDRAMAXI2Native(axi_port, user_port)
                 self.submodules += axi2native
-                platform.add_extension(get_axi_user_port_ios(i,
+                platform.add_extension(get_axi_user_port_ios(name,
                         axi_port.address_width,
                         axi_port.data_width,
-                        core_config["user_ports_id_width"]))
-                _axi_port_io = platform.request("user_port", i)
+                        port["id_width"]))
+                _axi_port_io = platform.request("user_port_{}".format(name))
                 self.comb += [
                     # aw
-                    axi_port.aw.valid.eq(_axi_port_io.aw_valid),
-                    _axi_port_io.aw_ready.eq(axi_port.aw.ready),
-                    axi_port.aw.addr.eq(_axi_port_io.aw_addr),
-                    axi_port.aw.burst.eq(_axi_port_io.aw_burst),
-                    axi_port.aw.len.eq(_axi_port_io.aw_len),
-                    axi_port.aw.size.eq(_axi_port_io.aw_size),
-                    axi_port.aw.id.eq(_axi_port_io.aw_id),
+                    axi_port.aw.valid.eq(_axi_port_io.awvalid),
+                    _axi_port_io.awready.eq(axi_port.aw.ready),
+                    axi_port.aw.addr.eq(_axi_port_io.awaddr),
+                    axi_port.aw.burst.eq(_axi_port_io.awburst),
+                    axi_port.aw.len.eq(_axi_port_io.awlen),
+                    axi_port.aw.size.eq(_axi_port_io.awsize),
+                    axi_port.aw.id.eq(_axi_port_io.awid),
 
                     # w
-                    axi_port.w.valid.eq(_axi_port_io.w_valid),
-                    _axi_port_io.w_ready.eq(axi_port.w.ready),
-                    axi_port.w.last.eq(_axi_port_io.w_last),
-                    axi_port.w.strb.eq(_axi_port_io.w_strb),
-                    axi_port.w.data.eq(_axi_port_io.w_data),
+                    axi_port.w.valid.eq(_axi_port_io.wvalid),
+                    _axi_port_io.wready.eq(axi_port.w.ready),
+                    axi_port.w.last.eq(_axi_port_io.wlast),
+                    axi_port.w.strb.eq(_axi_port_io.wstrb),
+                    axi_port.w.data.eq(_axi_port_io.wdata),
 
                     # b
-                    _axi_port_io.b_valid.eq(axi_port.b.valid),
-                    axi_port.b.ready.eq(_axi_port_io.b_ready),
-                    _axi_port_io.b_resp.eq(axi_port.b.resp),
-                    _axi_port_io.b_id.eq(axi_port.b.id),
+                    _axi_port_io.bvalid.eq(axi_port.b.valid),
+                    axi_port.b.ready.eq(_axi_port_io.bready),
+                    _axi_port_io.bresp.eq(axi_port.b.resp),
+                    _axi_port_io.bid.eq(axi_port.b.id),
 
                     # ar
-                    axi_port.ar.valid.eq(_axi_port_io.ar_valid),
-                    _axi_port_io.ar_ready.eq(axi_port.ar.ready),
-                    axi_port.ar.addr.eq(_axi_port_io.ar_addr),
-                    axi_port.ar.burst.eq(_axi_port_io.ar_burst),
-                    axi_port.ar.len.eq(_axi_port_io.ar_len),
-                    axi_port.ar.size.eq(_axi_port_io.ar_size),
-                    axi_port.ar.id.eq(_axi_port_io.ar_id),
+                    axi_port.ar.valid.eq(_axi_port_io.arvalid),
+                    _axi_port_io.arready.eq(axi_port.ar.ready),
+                    axi_port.ar.addr.eq(_axi_port_io.araddr),
+                    axi_port.ar.burst.eq(_axi_port_io.arburst),
+                    axi_port.ar.len.eq(_axi_port_io.arlen),
+                    axi_port.ar.size.eq(_axi_port_io.arsize),
+                    axi_port.ar.id.eq(_axi_port_io.arid),
 
                     # r
-                    _axi_port_io.r_valid.eq(axi_port.r.valid),
-                    axi_port.r.ready.eq(_axi_port_io.r_ready),
-                    _axi_port_io.r_last.eq(axi_port.r.last),
-                    _axi_port_io.r_resp.eq(axi_port.r.resp),
-                    _axi_port_io.r_data.eq(axi_port.r.data),
-                    _axi_port_io.r_id.eq(axi_port.r.id),
+                    _axi_port_io.rvalid.eq(axi_port.r.valid),
+                    axi_port.r.ready.eq(_axi_port_io.rready),
+                    _axi_port_io.rlast.eq(axi_port.r.last),
+                    _axi_port_io.rresp.eq(axi_port.r.resp),
+                    _axi_port_io.rdata.eq(axi_port.r.data),
+                    _axi_port_io.rid.eq(axi_port.r.id),
                 ]
-        else:
-            raise ValueError("Unsupported port type: {}".format(core_config["user_ports_type"]))
+            # FIFO ---------------------------------------------------------------------------------
+            elif port["type"] == "fifo":
+                platform.add_extension(get_fifo_user_port_ios(name, user_port.data_width))
+                _user_fifo_io = platform.request("user_fifo_{}".format(name))
+                fifo = LiteDRAMFIFO(
+                    data_width      = user_port.data_width,
+                    base            = port["base"],
+                    depth           = port["depth"],
+                    write_port      = self.sdram.crossbar.get_port("write"),
+                    write_threshold = port["depth"] - 32, # FIXME
+                    read_port       = self.sdram.crossbar.get_port("read"),
+                    read_threshold  = 32 # FIXME
+                )
+                self.submodules += fifo
+                self.comb += [
+                    # in
+                    fifo.sink.valid.eq(_user_fifo_io.in_valid),
+                    _user_fifo_io.in_ready.eq(fifo.sink.ready),
+                    fifo.sink.data.eq(_user_fifo_io.in_data),
+
+                    # out
+                    _user_fifo_io.out_valid.eq(fifo.source.valid),
+                    fifo.source.ready.eq(_user_fifo_io.out_ready),
+                    _user_fifo_io.out_data.eq(fifo.source.data),
+                ]
+            else:
+                raise ValueError("Unsupported port type: {}".format(port["type"]))
 
 # Build --------------------------------------------------------------------------------------------
 
@@ -458,7 +502,7 @@ def main():
 
     # Generate core --------------------------------------------------------------------------------
     platform = Platform()
-    soc      = LiteDRAMCore(platform, core_config, integrated_rom_size=0x6000)
+    soc      = LiteDRAMCore(platform, core_config, integrated_rom_size=0x6000, integrated_sram_size=0x1000)
     builder  = Builder(soc, output_dir="build", compile_gateware=False)
     vns      = builder.build(build_name="litedram_core", regular_comb=False)
 
