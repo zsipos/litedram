@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-# This file is Copyright (c) 2018-2019 Florent Kermarrec <florent@enjoy-digital.fr>
+# This file is Copyright (c) 2018-2020 Florent Kermarrec <florent@enjoy-digital.fr>
+# This file is Copyright (c) 2020 Stefan Schrijvers <ximin@ximinity.net>
 # License: BSD
 
 """
@@ -16,7 +17,8 @@ for some use cases it could be interesting to generate a standalone verilog file
 The standalone core is generated from a YAML configuration file that allows the user to generate
 easily a custom configuration of the core.
 
-Current version of the generator is limited to Xilinx 7-Series FPGA for DDR2/DDR3 memories.
+Current version of the generator is limited to DDR2/DDR3 Xilinx 7-Series FPGA and DDR3 on Lattice
+ECP5.
 """
 
 import os
@@ -31,6 +33,8 @@ from migen.genlib.resetsync import AsyncResetSynchronizer
 
 from litex.build.generic_platform import *
 from litex.build.xilinx import XilinxPlatform
+from litex.build.lattice import LatticePlatform
+from litex.boards.platforms import versa_ecp5
 
 from litex.soc.cores.clock import *
 from litex.soc.integration.soc_sdram import *
@@ -41,6 +45,8 @@ from litex.soc.cores.uart import *
 
 from litedram import modules as litedram_modules
 from litedram import phy as litedram_phys
+from litedram.phy.ecp5ddrphy import ECP5DDRPHY
+from litedram.phy.s7ddrphy import S7DDRPHY
 from litedram.core.controller import ControllerSettings
 from litedram.frontend.axi import *
 from litedram.frontend.wishbone import *
@@ -213,7 +219,50 @@ class Platform(XilinxPlatform):
 
 # CRG ----------------------------------------------------------------------------------------------
 
-class LiteDRAMCRG(Module):
+class LiteDRAMECP5DDRPHYCRG(Module):
+    def __init__(self, platform, core_config):
+        self.clock_domains.cd_init    = ClockDomain()
+        self.clock_domains.cd_por     = ClockDomain(reset_less=True)
+        self.clock_domains.cd_sys     = ClockDomain()
+        self.clock_domains.cd_sys2x   = ClockDomain()
+        self.clock_domains.cd_sys2x_i = ClockDomain(reset_less=True)
+
+        # # #
+
+        self.stop = Signal()
+
+        # clk / rst
+        clk = platform.request("clk")
+        rst = platform.request("rst")
+
+        # power on reset
+        por_count = Signal(16, reset=2**16-1)
+        por_done = Signal()
+        self.comb += self.cd_por.clk.eq(ClockSignal())
+        self.comb += por_done.eq(por_count == 0)
+        self.sync.por += If(~por_done, por_count.eq(por_count - 1))
+
+        # pll
+        self.submodules.pll = pll = ECP5PLL()
+        pll.register_clkin(clk, core_config['sys_clk_freq'])
+        pll.create_clkout(self.cd_sys2x_i, 2*core_config["sys_clk_freq"])
+        pll.create_clkout(self.cd_init, core_config['init_clk_freq'])
+        self.specials += [
+            Instance("ECLKSYNCB",
+                i_ECLKI=self.cd_sys2x_i.clk,
+                i_STOP=self.stop,
+                o_ECLKO=self.cd_sys2x.clk),
+            Instance("CLKDIVF",
+                p_DIV="2.0",
+                i_ALIGNWD=0,
+                i_CLKI=self.cd_sys2x.clk,
+                i_RST=self.cd_sys2x.rst,
+                o_CDIVX=self.cd_sys.clk),
+            AsyncResetSynchronizer(self.cd_init, ~por_done | ~pll.locked | rst),
+            AsyncResetSynchronizer(self.cd_sys, ~por_done | ~pll.locked | rst)
+        ]
+
+class LiteDRAMS7DDRPHYCRG(Module):
     def __init__(self, platform, core_config):
         self.clock_domains.cd_sys = ClockDomain()
         if core_config["memtype"] == "DDR3":
@@ -278,10 +327,10 @@ class LiteDRAMCore(SoCSDRAM):
             kwargs["with_uart"]            = False
             kwargs["with_timer"]           = False
             kwargs["with_ctrl"]            = False
-            kwargs["with_wishbone"]        = (cpu_type != None)
+            kwargs["with_wishbone"]        = False
         else:
-           kwargs["l2_size"]           = 0
-           kwargs["min_l2_data_width"] = 0
+            kwargs["l2_size"]           = 0
+            kwargs["min_l2_data_width"] = 0
 
         # SoCSDRAM ---------------------------------------------------------------------------------
         SoCSDRAM.__init__(self, platform, sys_clk_freq,
@@ -290,24 +339,37 @@ class LiteDRAMCore(SoCSDRAM):
             **kwargs)
 
         # CRG --------------------------------------------------------------------------------------
-        self.submodules.crg = LiteDRAMCRG(platform, core_config)
+        if core_config["sdram_phy"] in [litedram_phys.ECP5DDRPHY]:
+            self.submodules.crg = crg = LiteDRAMECP5DDRPHYCRG(platform, core_config)
+        if core_config["sdram_phy"] in [litedram_phys.A7DDRPHY, litedram_phys.K7DDRPHY, litedram_phys.V7DDRPHY]:
+            self.submodules.crg = LiteDRAMS7DDRPHYCRG(platform, core_config)
 
         # DRAM -------------------------------------------------------------------------------------
         platform.add_extension(get_dram_ios(core_config))
-        assert core_config["memtype"] in ["DDR2", "DDR3"]
-        self.submodules.ddrphy = core_config["sdram_phy"](
-            platform.request("ddram"),
-            memtype=core_config["memtype"],
-            nphases=4 if core_config["memtype"] == "DDR3" else 2,
-            sys_clk_freq=sys_clk_freq,
-            iodelay_clk_freq=core_config["iodelay_clk_freq"],
-            cmd_latency=core_config["cmd_latency"])
-        self.add_constant("CMD_DELAY", core_config["cmd_delay"])
-        if core_config["memtype"] == "DDR3":
-            self.ddrphy.settings.add_electrical_settings(
-                rtt_nom=core_config["rtt_nom"],
-                rtt_wr=core_config["rtt_wr"],
-                ron=core_config["ron"])
+        if core_config["sdram_phy"] in  [litedram_phys.ECP5DDRPHY]:
+            assert core_config["memtype"] in ["DDR3"]
+            self.submodules.ddrphy = core_config["sdram_phy"](
+                platform.request("ddram"),
+                sys_clk_freq=sys_clk_freq)
+            self.comb += crg.stop.eq(self.ddrphy.init.stop)
+            sdram_module = core_config["sdram_module"](sys_clk_freq, "1:2")
+        if core_config["sdram_phy"] in [litedram_phys.A7DDRPHY, litedram_phys.K7DDRPHY, litedram_phys.V7DDRPHY]:
+            assert core_config["memtype"] in ["DDR2", "DDR3"]
+            self.submodules.ddrphy = core_config["sdram_phy"](
+                platform.request("ddram"),
+                memtype=core_config["memtype"],
+                nphases=4 if core_config["memtype"] == "DDR3" else 2,
+                sys_clk_freq=sys_clk_freq,
+                iodelay_clk_freq=core_config["iodelay_clk_freq"],
+                cmd_latency=core_config["cmd_latency"])
+            self.add_constant("CMD_DELAY", core_config["cmd_delay"])
+            if core_config["memtype"] == "DDR3":
+                self.ddrphy.settings.add_electrical_settings(
+                    rtt_nom=core_config["rtt_nom"],
+                    rtt_wr=core_config["rtt_wr"],
+                    ron=core_config["ron"])
+
+
         sdram_module = core_config["sdram_module"](sys_clk_freq,
             "1:4" if core_config["memtype"] == "DDR3" else "1:2")
         controller_settings = controller_settings=ControllerSettings(
@@ -501,7 +563,13 @@ def main():
             core_config[k] = getattr(litedram_phys, core_config[k])
 
     # Generate core --------------------------------------------------------------------------------
-    platform = Platform()
+    if core_config["sdram_phy"] in [litedram_phys.ECP5DDRPHY]:
+        platform = LatticePlatform("", io=[], toolchain="diamond")
+    elif core_config["sdram_phy"] in [litedram_phys.A7DDRPHY, litedram_phys.K7DDRPHY, litedram_phys.V7DDRPHY]:
+        platform = XilinxPlatform("", io=[], toolchain="vivado")
+    else:
+        raise ValueError("Unsupported SDRAM PHY: {}".format(core_config["sdram_phy"]))
+
     soc      = LiteDRAMCore(platform, core_config, integrated_rom_size=0x6000, integrated_sram_size=0x1000)
     builder  = Builder(soc, output_dir="build", compile_gateware=False)
     vns      = builder.build(build_name="litedram_core", regular_comb=False)

@@ -1,4 +1,5 @@
 # This file is Copyright (c) 2015-2020 Florent Kermarrec <florent@enjoy-digital.fr>
+# This file is Copyright (c) 2020 Piotr Binkowski <pbinkowski@antmicro.com>
 # License: BSD
 
 # SDRAM simulation PHY at DFI level tested with SDR/DDR/DDR2/LPDDR/DDR3
@@ -19,7 +20,7 @@ from operator import or_
 # Bank Model ---------------------------------------------------------------------------------------
 
 class BankModel(Module):
-    def __init__(self, data_width, nrows, ncols, burst_length, we_granularity):
+    def __init__(self, data_width, nrows, ncols, burst_length, we_granularity, init):
         self.activate     = Signal()
         self.activate_row = Signal(max=nrows)
         self.precharge    = Signal()
@@ -35,6 +36,11 @@ class BankModel(Module):
 
         # # #
 
+        # FIXME: understand and cleanup
+        init.extend([0]*(4-len(init)%4))
+        for i in range(0, len(init), 4):
+            init[i], init[i+1], init[i+2], init[i+3] = init[i+3], init[i+2], init[i+1], init[i]
+
         active = Signal()
         row    = Signal(max=nrows)
 
@@ -46,7 +52,7 @@ class BankModel(Module):
                 row.eq(self.activate_row)
             )
 
-        mem        = Memory(data_width, nrows*ncols//burst_length)
+        mem        = Memory(data_width, nrows*ncols//burst_length, init=init)
         write_port = mem.get_port(write_capable=True, we_granularity=we_granularity)
         read_port  = mem.get_port(async_read=True)
         self.specials += mem, read_port, write_port
@@ -103,7 +109,7 @@ class DFIPhaseModel(Module):
 # SDRAM PHY Model ----------------------------------------------------------------------------------
 
 class SDRAMPHYModel(Module):
-    def __init__(self, module, settings, we_granularity=8):
+    def __init__(self, module, settings, we_granularity=8, init=[], address_mapping="ROW_BANK_COL"):
         # Parameters
         burst_length = {
             "SDR":   1,
@@ -111,6 +117,7 @@ class SDRAMPHYModel(Module):
             "LPDDR": 2,
             "DDR2":  2,
             "DDR3":  2,
+            "DDR4":  2,
             }[settings.memtype]
 
         addressbits   = module.geom_settings.addressbits
@@ -141,8 +148,29 @@ class SDRAMPHYModel(Module):
         phases = [DFIPhaseModel(self.dfi, n) for n in range(self.settings.nphases)]
         self.submodules += phases
 
+        # Bank init data ---------------------------------------------------------------------------
+        bank_size   = (data_width//8)*(nrows*ncols//burst_length) // 4
+        column_size = bank_size // nrows
+        bank_init   = [[] for i in range(nbanks)]
+
+        if address_mapping == "ROW_BANK_COL":
+            for row in range(nrows):
+                for bank in range(nbanks):
+                    start = row*nbanks*column_size + bank*column_size
+                    end   = min(start + column_size, len(init))
+                    if start > len(init):
+                        break
+                    bank_init[bank].extend(init[start:end])
+        elif address_mapping == "BANK_ROW_COL":
+            for bank in range(nbanks):
+                start = bank*bank_size
+                end   = min(start + bank_size, len(init))
+                if start > len(init):
+                    break
+                bank_init[bank] = init[start:end]
+
         # Banks ------------------------------------------------------------------------------------
-        banks = [BankModel(data_width, nrows, ncols, burst_length, we_granularity) for i in range(nbanks)]
+        banks = [BankModel(data_width, nrows, ncols, burst_length, we_granularity, bank_init[i]) for i in range(nbanks)]
         self.submodules += banks
 
         # Connect DFI phases to Banks (CMDs, Write datapath) ---------------------------------------
@@ -169,18 +197,36 @@ class SDRAMPHYModel(Module):
             self.comb += Case(precharges, cases)
 
             # Bank writes
+            bank_write = Signal()
+            bank_write_col = Signal(max=ncols)
             writes = Signal(len(phases))
             cases  = {}
             for np, phase in enumerate(phases):
                 self.comb += writes[np].eq(phase.write)
                 cases[2**np] = [
-                    bank.write.eq(phase.bank == nb),
-                    bank.write_col.eq(phase.address)
+                    bank_write.eq(phase.bank == nb),
+                    bank_write_col.eq(phase.address)
                 ]
             self.comb += Case(writes, cases)
             self.comb += [
                 bank.write_data.eq(Cat(*[phase.wrdata for phase in phases])),
                 bank.write_mask.eq(Cat(*[phase.wrdata_mask for phase in phases]))
+            ]
+
+            # Simulate write latency
+            for i in range(self.settings.write_latency):
+                new_bank_write     = Signal()
+                new_bank_write_col = Signal(max=ncols)
+                self.sync += [
+                    new_bank_write.eq(bank_write),
+                    new_bank_write_col.eq(bank_write_col)
+                ]
+                bank_write = new_bank_write
+                bank_write_col = new_bank_write_col
+
+            self.comb += [
+                bank.write.eq(bank_write),
+                bank.write_col.eq(bank_write_col)
             ]
 
             # Bank reads
