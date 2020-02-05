@@ -17,6 +17,8 @@ from litedram.phy.dfi import *
 from functools import reduce
 from operator import or_
 
+import struct
+
 # Bank Model ---------------------------------------------------------------------------------------
 
 class BankModel(Module):
@@ -113,6 +115,59 @@ class DFIPhaseModel(Module):
 # SDRAM PHY Model ----------------------------------------------------------------------------------
 
 class SDRAMPHYModel(Module):
+    def __prepare_bank_init_data(self, init, nbanks, nrows, ncols, data_width, address_mapping):
+        mem_size          = (self.settings.databits//8)*(nrows*ncols*nbanks)
+        bank_size         = mem_size // nbanks
+        column_size       = bank_size // nrows
+        model_bank_size   = bank_size // (data_width//8)
+        model_column_size = model_bank_size // nrows
+        model_data_ratio  = data_width // 32
+        data_width_bytes  = data_width // 8
+        bank_init         = [[] for i in range(nbanks)]
+
+        # Pad init if too short
+        if len(init)%data_width_bytes != 0:
+            init.extend([0]*(data_width_bytes-len(init)%data_width_bytes))
+
+
+        # Convert init data width from 32-bit to data_width if needed
+        if model_data_ratio > 1:
+            new_init = [0]*(len(init)//model_data_ratio)
+            for i in range(0, len(init), model_data_ratio):
+                ints = init[i:i+model_data_ratio]
+                strs = ''.join('{:08x}'.format(x) for x in reversed(ints))
+                new_init[i//model_data_ratio] = int(strs, 16)
+            init = new_init
+        elif model_data_ratio == 0:
+            assert data_width_bytes in [1, 2]
+            model_data_ratio = 4 // data_width_bytes
+            struct_unpack_patterns = {1: "4B", 2: "2H"}
+            new_init = [0]*int(len(init)*model_data_ratio)
+            for i in range(len(init)):
+                new_init[model_data_ratio*i:model_data_ratio*(i+1)] = struct.unpack(
+                    struct_unpack_patterns[data_width_bytes],
+                    struct.pack("I", init[i])
+                )[0:model_data_ratio]
+            init = new_init
+
+        if address_mapping == "ROW_BANK_COL":
+            for row in range(nrows):
+                for bank in range(nbanks):
+                    start = (row*nbanks*model_column_size + bank*model_column_size)
+                    end   = min(start + model_column_size, len(init))
+                    if start > len(init):
+                        break
+                    bank_init[bank].extend(init[start:end])
+        elif address_mapping == "BANK_ROW_COL":
+            for bank in range(nbanks):
+                start = bank*model_bank_size
+                end   = min(start + model_bank_size, len(init))
+                if start > len(init):
+                    break
+                bank_init[bank] = init[start:end]
+
+        return bank_init
+
     def __init__(self, module, settings, we_granularity=8, init=[], address_mapping="ROW_BANK_COL"):
         # Parameters
         burst_length = {
@@ -154,52 +209,10 @@ class SDRAMPHYModel(Module):
         self.submodules += phases
 
         # Bank init data ---------------------------------------------------------------------------
-        mem_size          = (self.settings.databits//8)*(nrows*ncols*nbanks)
-        bank_size         = mem_size // nbanks
-        column_size       = bank_size // nrows
-        model_bank_size   = bank_size // (data_width//8)
-        model_column_size = model_bank_size // nrows
-        model_data_ratio  = data_width // 32
-        data_width_bytes  = data_width // 8
-        bank_init         = [[] for i in range(nbanks)]
+        bank_init  = [[] for i in range(nbanks)]
 
-        # FIXME: understand and cleanup
-        # Pad init if too short
-        if len(init)%data_width_bytes != 0:
-            init.extend([0]*(data_width_bytes-len(init)%data_width_bytes))
-
-        new_init          = [0]*(len(init)//model_data_ratio)
-
-        # Reverse order of 32-bit words in 128-bit groups
-        for i in range(0, len(init), 4):
-            init[i:i+4] = reversed(init[i:i+4])
-
-        # Convert init data width from 32-bit to data_width
-        for i in range(0, len(init), model_data_ratio):
-            ints = init[i:i+model_data_ratio]
-            strs = ''.join('{:08x}'.format(x) for x in reversed(ints))
-            if data_width > 128:
-                # Reverse order of each 128-bit group
-                strs = ''.join(reversed([strs[i:i+32] for i in range(0, len(strs), 32)]))
-            new_init[i//model_data_ratio] = int(strs, 16)
-
-        init = new_init
-
-        if address_mapping == "ROW_BANK_COL":
-            for row in range(nrows):
-                for bank in range(nbanks):
-                    start = (row*nbanks*model_column_size + bank*model_column_size)
-                    end   = min(start + model_column_size, len(init))
-                    if start > len(init):
-                        break
-                    bank_init[bank].extend(init[start:end])
-        elif address_mapping == "BANK_ROW_COL":
-            for bank in range(nbanks):
-                start = bank*model_bank_size
-                end   = min(start + model_bank_size, len(init))
-                if start > len(init):
-                    break
-                bank_init[bank] = init[start:end]
+        if init:
+            bank_init = self.__prepare_bank_init_data(init, nbanks, nrows, ncols, data_width, address_mapping)
 
         # Banks ------------------------------------------------------------------------------------
         banks = [BankModel(data_width, nrows, ncols, burst_length, nphases, we_granularity, bank_init[i]) for i in range(nbanks)]
