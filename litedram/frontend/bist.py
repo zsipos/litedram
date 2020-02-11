@@ -185,6 +185,68 @@ class _LiteDRAMBISTGenerator(Module):
             raise NotImplementedError
         self.comb += dma.sink.data.eq(data_gen.o)
 
+@ResetInserter()
+class _LiteDRAMPatternGenerator(Module):
+    def __init__(self, dram_port, init=[]):
+        ashift, awidth = get_ashift_awidth(dram_port)
+        self.start  = Signal()
+        self.done   = Signal()
+        self.ticks  = Signal(32)
+
+        # # #
+
+        # Data / Address pattern -------------------------------------------------------------------
+        addr_init, data_init = zip(*init)
+        addr_mem = Memory(dram_port.address_width, len(addr_init), init=addr_init)
+        data_mem = Memory(dram_port.data_width,    len(data_init), init=data_init)
+        addr_port = addr_mem.get_port(async_read=True)
+        data_port = data_mem.get_port(async_read=True)
+        self.specials += addr_mem, data_mem, addr_port, data_port
+
+        # DMA --------------------------------------------------------------------------------------
+        dma = LiteDRAMDMAWriter(dram_port)
+        self.submodules += dma
+
+        cmd_counter = Signal(dram_port.address_width, reset_less=True)
+
+        # Data / Address FSM -----------------------------------------------------------------------
+        fsm = FSM(reset_state="IDLE")
+        self.submodules += fsm
+        fsm.act("IDLE",
+            If(self.start,
+                NextValue(cmd_counter, 0),
+                NextState("RUN")
+            ),
+            NextValue(self.ticks, 0)
+        )
+        fsm.act("RUN",
+            dma.sink.valid.eq(1),
+            If(dma.sink.ready,
+                NextValue(cmd_counter, cmd_counter + 1),
+                If(cmd_counter == (len(init) - 1),
+                    NextState("DONE")
+                )
+            ),
+            NextValue(self.ticks, self.ticks + 1)
+        )
+        fsm.act("DONE",
+            self.done.eq(1)
+        )
+
+        if isinstance(dram_port, LiteDRAMNativePort): # addressing in dwords
+            dma_sink_addr = dma.sink.address
+        elif isinstance(dram_port, LiteDRAMAXIPort):  # addressing in bytes
+            dma_sink_addr = dma.sink.address[ashift:]
+        else:
+            raise NotImplementedError
+
+        self.comb += [
+            addr_port.adr.eq(cmd_counter),
+            dma_sink_addr.eq(addr_port.dat_r),
+            data_port.adr.eq(cmd_counter),
+            dma.sink.data.eq(data_port.dat_r),
+        ]
+
 # LiteDRAMBISTGenerator ----------------------------------------------------------------------------
 
 class LiteDRAMBISTGenerator(Module, AutoCSR):
@@ -358,6 +420,100 @@ class _LiteDRAMBISTChecker(Module, AutoCSR):
                     NextValue(self.errors, self.errors + 1)
                 ),
                 If(data_counter == (self.length[ashift:] - 1),
+                    NextState("DONE")
+                )
+            ),
+            NextValue(self.ticks, self.ticks + 1)
+        )
+        data_fsm.act("DONE",
+            self.done.eq(1)
+        )
+
+@ResetInserter()
+class _LiteDRAMPatternChecker(Module, AutoCSR):
+    def __init__(self, dram_port, init=[]):
+        ashift, awidth = get_ashift_awidth(dram_port)
+        self.start  = Signal()
+        self.done   = Signal()
+        self.ticks  = Signal(32)
+        self.errors = Signal(32)
+
+        # # #
+
+        # Data / Address pattern -------------------------------------------------------------------
+        addr_init, data_init = zip(*init)
+        addr_mem = Memory(dram_port.address_width, len(addr_init), init=addr_init)
+        data_mem = Memory(dram_port.data_width,    len(data_init), init=data_init)
+        addr_port = addr_mem.get_port(async_read=True)
+        data_port = data_mem.get_port(async_read=True)
+        self.specials += addr_mem, data_mem, addr_port, data_port
+
+        # DMA --------------------------------------------------------------------------------------
+        dma = LiteDRAMDMAReader(dram_port)
+        self.submodules += dma
+
+        # Address FSM ------------------------------------------------------------------------------
+        cmd_counter = Signal(dram_port.address_width, reset_less=True)
+
+        cmd_fsm = FSM(reset_state="IDLE")
+        self.submodules += cmd_fsm
+        cmd_fsm.act("IDLE",
+            If(self.start,
+                NextValue(cmd_counter, 0),
+                NextState("RUN")
+            )
+        )
+        cmd_fsm.act("RUN",
+            dma.sink.valid.eq(1),
+            If(dma.sink.ready,
+                NextValue(cmd_counter, cmd_counter + 1),
+                If(cmd_counter == (len(init) - 1),
+                    NextState("DONE")
+                )
+            )
+        )
+        cmd_fsm.act("DONE")
+
+        if isinstance(dram_port, LiteDRAMNativePort): # addressing in dwords
+            dma_sink_addr = dma.sink.address
+        elif isinstance(dram_port, LiteDRAMAXIPort):  # addressing in bytes
+            dma_sink_addr = dma.sink.address[ashift:]
+        else:
+            raise NotImplementedError
+
+        self.comb += [
+            addr_port.adr.eq(cmd_counter),
+            dma_sink_addr.eq(addr_port.dat_r),
+        ]
+
+        # Data FSM ---------------------------------------------------------------------------------
+        data_counter = Signal(dram_port.address_width, reset_less=True)
+
+        expected_data = Signal.like(dma.source.data)
+        self.comb += [
+            data_port.adr.eq(data_counter),
+            expected_data.eq(data_port.dat_r),
+        ]
+
+        data_fsm = FSM(reset_state="IDLE")
+        self.submodules += data_fsm
+        data_fsm.act("IDLE",
+            If(self.start,
+                NextValue(data_counter, 0),
+                NextValue(self.errors, 0),
+                NextState("RUN")
+            ),
+            NextValue(self.ticks, 0)
+        )
+
+        data_fsm.act("RUN",
+            dma.source.ready.eq(1),
+            If(dma.source.valid,
+                NextValue(data_counter, data_counter + 1),
+                If(dma.source.data != expected_data,
+                    NextValue(self.errors, self.errors + 1)
+                ),
+                If(data_counter == (len(init) - 1),
                     NextState("DONE")
                 )
             ),
