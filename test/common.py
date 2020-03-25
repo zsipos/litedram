@@ -1,8 +1,11 @@
 # This file is Copyright (c) 2016-2019 Florent Kermarrec <florent@enjoy-digital.fr>
 # This file is Copyright (c) 2016 Tim 'mithro' Ansell <mithro@mithis.com>
+# This file is Copyright (c) 2020 Antmicro <www.antmicro.com>
 # License: BSD
 
+import os
 import random
+from operator import or_
 
 from migen import *
 
@@ -31,9 +34,34 @@ class DRAMMemory:
         for _ in range(depth-len(init)):
             self.mem.append(0)
 
+        # "W" enables write msgs, "R" - read msgs and "1" both
+        self._debug = os.environ.get("DRAM_MEM_DEBUG", "0")
+
     def show_content(self):
         for addr in range(self.depth):
-            print("0x{:08x}: 0x{:08x}".format(addr, self.mem[addr]))
+            print("0x{:08x}: 0x{:0{dwidth}x}".format(addr, self.mem[addr], dwidth=self.width//4))
+
+    def _warn(self, address):
+        if address > self.depth * self.width:
+            print("! adr > 0x{:08x}".format(
+                self.depth * self.width))
+
+    def _write(self, address, data, we):
+        mask = reduce(or_, [0xff << (8 * bit) for bit in range(self.width//8)
+                            if (we & (1 << bit)) != 0], 0)
+        data = data & mask
+        self.mem[address%self.depth] = data
+        if self._debug in ["1", "W"]:
+            print("W 0x{:08x}: 0x{:0{dwidth}x}".format(address, self.mem[address%self.depth],
+                                                       dwidth=self.width//4))
+            self._warn(address)
+
+    def _read(self, address):
+        if self._debug in ["1", "R"]:
+            print("R 0x{:08x}: 0x{:0{dwidth}x}".format(address, self.mem[address%self.depth],
+                                                       dwidth=self.width//4))
+            self._warn(address)
+        return self.mem[address%self.depth]
 
     @passive
     def read_handler(self, dram_port, rdata_valid_random=0):
@@ -47,7 +75,7 @@ class DRAMMemory:
                 while prng.randrange(100) < rdata_valid_random:
                     yield
                 yield dram_port.rdata.valid.eq(1)
-                yield dram_port.rdata.data.eq(self.mem[address%self.depth])
+                yield dram_port.rdata.data.eq(self._read(address))
                 yield
                 yield dram_port.rdata.valid.eq(0)
                 yield dram_port.rdata.data.eq(0)
@@ -76,7 +104,7 @@ class DRAMMemory:
                     yield
                 yield dram_port.wdata.ready.eq(1)
                 yield
-                self.mem[address%self.depth] = (yield dram_port.wdata.data) # TODO manage we
+                self._write(address, (yield dram_port.wdata.data), (yield dram_port.wdata.we))
                 yield dram_port.wdata.ready.eq(0)
                 yield
                 pending = 0
@@ -89,3 +117,263 @@ class DRAMMemory:
                     yield
                     yield dram_port.cmd.ready.eq(0)
             yield
+
+class MemoryTestDataMixin:
+    @property
+    def bist_test_data(self):
+        data = {
+            "8bit": dict(
+                base=2,
+                end=2 + 8,  # (end - base) must be pow of 2
+                length=5,
+                #                       2     3     4     5     6     7=2+5
+                expected=[0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x00],
+            ),
+            "32bit": dict(
+                base=0x04,
+                end=0x04 + 8,
+                length=5 * 4,
+                expected=[
+                    0x00000000,  # 0x00
+                    0x00000000,  # 0x04
+                    0x00000001,  # 0x08
+                    0x00000002,  # 0x0c
+                    0x00000003,  # 0x10
+                    0x00000004,  # 0x14
+                    0x00000000,  # 0x18
+                    0x00000000,  # 0x1c
+                ],
+            ),
+            "64bit": dict(
+                base=0x10,
+                end=0x10 + 8,
+                length=5 * 8,
+                expected=[
+                    0x0000000000000000,  # 0x00
+                    0x0000000000000000,  # 0x08
+                    0x0000000000000000,  # 0x10
+                    0x0000000000000001,  # 0x18
+                    0x0000000000000002,  # 0x20
+                    0x0000000000000003,  # 0x28
+                    0x0000000000000004,  # 0x30
+                    0x0000000000000000,  # 0x38
+                ],
+            ),
+            "32bit_masked": dict(
+                base=0x04,
+                end=0x04 + 0x04,  # TODO: fix address masking to be consistent
+                length=6 * 4,
+                expected=[  # due to masking
+                    0x00000000,  # 0x00
+                    0x00000004,  # 0x04
+                    0x00000005,  # 0x08
+                    0x00000002,  # 0x0c
+                    0x00000003,  # 0x10
+                    0x00000000,  # 0x14
+                    0x00000000,  # 0x18
+                    0x00000000,  # 0x1c
+                ],
+            ),
+        }
+        data["32bit_long_sequential"] = dict(
+            base=16,
+            end=16 + 128,
+            length=64,
+            expected=[0x00000000] * 128
+        )
+        expected = data["32bit_long_sequential"]["expected"]
+        expected[16//4:(16 + 64)//4] = list(range(64//4))
+        return data
+
+    @property
+    def pattern_test_data(self):
+        data = {
+            "8bit": dict(
+                pattern=[
+                    # address, data
+                    (0x00, 0xaa),
+                    (0x05, 0xbb),
+                    (0x02, 0xcc),
+                    (0x07, 0xdd),
+                ],
+                expected=[
+                    # data, address
+                    0xaa,  # 0x00
+                    0x00,  # 0x01
+                    0xcc,  # 0x02
+                    0x00,  # 0x03
+                    0x00,  # 0x04
+                    0xbb,  # 0x05
+                    0x00,  # 0x06
+                    0xdd,  # 0x07
+                ],
+            ),
+            "32bit": dict(
+                pattern=[
+                    # address, data
+                    (0x00, 0xabadcafe),
+                    (0x07, 0xbaadf00d),
+                    (0x02, 0xcafefeed),
+                    (0x01, 0xdeadc0de),
+                ],
+                expected=[
+                    # data, address
+                    0xabadcafe,  # 0x00
+                    0xdeadc0de,  # 0x04
+                    0xcafefeed,  # 0x08
+                    0x00000000,  # 0x0c
+                    0x00000000,  # 0x10
+                    0x00000000,  # 0x14
+                    0x00000000,  # 0x18
+                    0xbaadf00d,  # 0x1c
+                ],
+            ),
+            "64bit": dict(
+                pattern=[
+                    # address, data
+                    (0x00, 0x0ddf00dbadc0ffee),
+                    (0x05, 0xabadcafebaadf00d),
+                    (0x02, 0xcafefeedfeedface),
+                    (0x07, 0xdeadc0debaadbeef),
+                ],
+                expected=[
+                    # data, address
+                    0x0ddf00dbadc0ffee,  # 0x00
+                    0x0000000000000000,  # 0x08
+                    0xcafefeedfeedface,  # 0x10
+                    0x0000000000000000,  # 0x18
+                    0x0000000000000000,  # 0x20
+                    0xabadcafebaadf00d,  # 0x28
+                    0x0000000000000000,  # 0x30
+                    0xdeadc0debaadbeef,  # 0x38
+                ],
+            ),
+            "64bit_to_32bit": dict(
+                pattern=[
+                    # address, data
+                    (0x00, 0x0d15ea5e00facade),
+                    (0x05, 0xabadcafe8badf00d),
+                    (0x01, 0xcafefeedbaadf00d),
+                    (0x02, 0xfee1deaddeadc0de),
+                ],
+                expected=[
+                    # data, word, address
+                    0x00facade,  #  0 0x00
+                    0x0d15ea5e,  #  1 0x04
+                    0xbaadf00d,  #  2 0x08
+                    0xcafefeed,  #  3 0x0c
+                    0xdeadc0de,  #  4 0x10
+                    0xfee1dead,  #  5 0x14
+                    0x00000000,  #  6 0x18
+                    0x00000000,  #  7 0x1c
+                    0x00000000,  #  8 0x20
+                    0x00000000,  #  9 0x24
+                    0x8badf00d,  # 10 0x28
+                    0xabadcafe,  # 11 0x2c
+                    0x00000000,  # 12 0x30
+                ]
+            ),
+            "32bit_to_8bit": dict(
+                pattern=[
+                    # address, data
+                    (0x00, 0x00112233),
+                    (0x05, 0x44556677),
+                    (0x01, 0x8899aabb),
+                    (0x02, 0xccddeeff),
+                ],
+                expected=[
+                    # data, address
+                    0x33,  # 0x00
+                    0x22,  # 0x01
+                    0x11,  # 0x02
+                    0x00,  # 0x03
+                    0xbb,  # 0x04
+                    0xaa,  # 0x05
+                    0x99,  # 0x06
+                    0x88,  # 0x07
+                    0xff,  # 0x08
+                    0xee,  # 0x09
+                    0xdd,  # 0x0a
+                    0xcc,  # 0x0b
+                    0x00,  # 0x0c
+                    0x00,  # 0x0d
+                    0x00,  # 0x0e
+                    0x00,  # 0x0f
+                    0x00,  # 0x10
+                    0x00,  # 0x11
+                    0x00,  # 0x12
+                    0x00,  # 0x13
+                    0x77,  # 0x14
+                    0x66,  # 0x15
+                    0x55,  # 0x16
+                    0x44,  # 0x17
+                    0x00,  # 0x18
+                    0x00,  # 0x19
+                ]
+            ),
+            "32bit_not_aligned": dict(
+                pattern=[
+                    # address, data
+                    (0x00, 0xabadcafe),
+                    (0x07, 0xbaadf00d),
+                    (0x02, 0xcafefeed),
+                    (0x01, 0xdeadc0de),
+                ],
+                expected=[
+                    # data, address
+                    0xabadcafe,  # 0x00
+                    0xdeadc0de,  # 0x04
+                    0xcafefeed,  # 0x08
+                    0x00000000,  # 0x0c
+                    0x00000000,  # 0x10
+                    0x00000000,  # 0x14
+                    0x00000000,  # 0x18
+                    0xbaadf00d,  # 0x1c
+                ],
+            ),
+            "32bit_duplicates": dict(
+                pattern=[
+                    # address, data
+                    (0x00, 0xabadcafe),
+                    (0x07, 0xbaadf00d),
+                    (0x00, 0xcafefeed),
+                    (0x07, 0xdeadc0de),
+                ],
+                expected=[
+                    # data, address
+                    0xcafefeed,  # 0x00
+                    0x00000000,  # 0x04
+                    0x00000000,  # 0x08
+                    0x00000000,  # 0x0c
+                    0x00000000,  # 0x10
+                    0x00000000,  # 0x14
+                    0x00000000,  # 0x18
+                    0xdeadc0de,  # 0x1c
+                ],
+            ),
+            "32bit_sequential": dict(
+                pattern=[
+                    # address, data
+                    (0x02, 0xabadcafe),
+                    (0x03, 0xbaadf00d),
+                    (0x04, 0xcafefeed),
+                    (0x05, 0xdeadc0de),
+                ],
+                expected=[
+                    # data, address
+                    0x00000000,  # 0x00
+                    0x00000000,  # 0x04
+                    0xabadcafe,  # 0x08
+                    0xbaadf00d,  # 0x0c
+                    0xcafefeed,  # 0x10
+                    0xdeadc0de,  # 0x14
+                    0x00000000,  # 0x18
+                    0x00000000,  # 0x1c
+                ],
+            ),
+            "32bit_long_sequential": dict(pattern=[], expected=[0] * 64),
+        }
+        for i in range(32):
+            data["32bit_long_sequential"]["pattern"].append((i, 64 + i))
+            data["32bit_long_sequential"]["expected"][i] = 64 + i
+        return data
